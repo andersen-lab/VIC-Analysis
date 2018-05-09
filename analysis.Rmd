@@ -1,0 +1,347 @@
+# Analysis
+
+### Read dataset and preprocess.
+
+Remove mAb 135 because it is missing Neut_micro.
+
+```{r}
+df <- read.csv("./data/master_log.csv", na.strings=c("?", "nd"), strip.white=TRUE, row.names=c("Ab"))
+df <- df[!rownames(df) %in% c("135"),]
+```
+
+Convert Epitope Class to a factor.
+
+```{r}
+df$Epitope_Class <- factor(df$Epitope_Class)
+```
+
+Drop columns with missing values.
+
+```{r}
+df <- subset(df, select=-c(Protect_binary, Epitope_Class_ELISA, Endotoxin, Endotoxin.1, mW_Loss, aTTD, Epitope.Class..assigning.method.)) #Remove columns with empty values.
+df[,"Escape..code"] <- as.factor(df[,"Escape..code"])
+df[,"Makona.binding"] <- as.factor(df[,"Makona.binding"])
+```
+
+Make unNeutFrac, Neut_dVP30 and Neut_VSV correlate positively with Protection.
+
+```{r}
+df[,"unNeutFrac"] <- 1- df[,"unNeutFrac"]
+df[,"Neut_dVP30"] <- 1- df[,"Neut_dVP30"]
+df[,"Neut_VSV"] <- (100 - df[,"Neut_VSV"])/100
+```
+
+Separate Human IgG1 and Mouse IgG1
+
+```{r}
+levels(df[,"Isotype"]) <- c(levels(df[,"Isotype"]), "HumanIgG1")
+df[df[,"Isotype"]=="IgG1" & df[,"Species"]=="human", "Isotype"] <- "HumanIgG1"
+levels(df[,"Isotype"]) <- c(levels(df[,"Isotype"]), "MouseIgG1")
+df[df[,"Isotype"]=="IgG1" & df[,"Species"]=="mouse", "Isotype"] <- "MouseIgG1"
+df[,"Isotype"] <- droplevels(df[,"Isotype"])
+```
+
+Convert polyfunctionality to numeric type.
+```{r}
+df[,"Polyfunctionality"] <- as.numeric(df[,"Polyfunctionality"])
+```
+
+Add Epitope Tier columns
+```{r}
+df[df$Epitope_Class %in% c("Cap", "GP1/Head", "Mucin"), "Epitope_Tier"] <- "Tier1"
+df[df$Epitope_Class %in% c("Base", "GP1/Core", "Fusion"), "Epitope_Tier"] <- "Tier2"
+df[df$Epitope_Class %in% c("GP1/2", "HR2"), "Epitope_Tier"] <- "Tier3"
+df[df$Epitope_Class %in% c("Unknown"), "Epitope_Tier"] <- "TierUnknown"
+```
+
+Create mAB id columns
+```{r}
+df[,"id"] <- rownames(df)
+head(df)
+```
+
+### Univariate Analysis
+
+Calculate Spearman's rank correlation coefficient between "Protection" and other columns.
+Plot only statistically significant correlations(significance value = 0.05).
+
+```{r}
+library(ggplot2)
+
+## Correlation Strength
+co <- sapply(colnames(df), function(x){
+    if(is.numeric(df[,x])){
+        t <- cor.test(df[,"Protection"], df[,x], method="spearman", exact=FALSE)
+        if(t$p.value <= 0.05){
+            t$estimate
+        }
+    }
+})
+co <- as.data.frame(unlist(co))
+colnames(co) <- c("corr")
+rownames(co) <- sapply(rownames(co), function(x){
+    gsub(".rho", "", x)
+})
+co[,"X1"] <- "Protection"
+co[,"X2"] <- rownames(co)
+co <- co[with(co, order(-abs(corr))),]
+co <- co[co[,"X2"]!="Protection",]
+
+ggplot(co, aes(reorder(X2, abs(corr)), abs(corr))) + geom_bar(stat="identity", aes(fill=corr > 0)) + scale_fill_manual(name="Spearman's Rank Correlation", labels = c("FALSE" = "Negative", "TRUE" = "Positive"), values = c('#ff4c4c', '#4c4cff')) + xlab("") + ylab("Correlation Strength") + theme_bw()+ theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+ coord_flip()
+
+
+```
+
+### Identify differences in features grouped by Epitope_Class
+
+Kruskal-Wallis test for numeric features.
+Chi squared test for categorical features.
+Significance Level = 0.05
+
+```{r}
+t <- df
+
+pval <- c()
+col <- c()
+fpval <- c()
+fcol <- c()
+for(i in colnames(t)){
+    if(class(t[,i])=="numeric" & i!="Epitope_Class"){ #For numeric features perform Kruskal–Wallis test.
+        tdf <- data.frame(feature=t[,i], group= t[,"Epitope_Class"])
+        f <- kruskal.test(feature~group, data=tdf)
+        pval <- c(pval, f$p.value)
+        col <- c(col, i)
+    } else if(class(t[,i])!="numeric" & i!="Epitope_Class") { #For categorical features perform Chi Squared test.
+        t[,i] <- as.factor(t[,i])
+        print(i)
+        set.seed(1)
+        p <- chisq.test(as.factor(t[,i]), t[,"Epitope_Class"], simulate.p.value=TRUE)
+        fpval <- c(fpval, p$p.value)
+        fcol <- c(fcol, i)
+    }
+}
+
+```
+
+Multiple Hypothesis Correction by false discovery rate(Benjamani-Hochberg Method).
+Significance Level = 0.05
+
+```{r}
+corpval <- p.adjust(unlist(pval), method="fdr")
+fcorpval <- p.adjust(unlist(fpval), method="fdr")
+
+epdiff <- data.frame(col, pval, corpval)
+fepdiff <- data.frame(col=fcol, pval=fpval, corpval=fcorpval)
+
+epdiff[epdiff[,"corpval"]<0.05,]
+fepdiff[fepdiff[,"corpval"]<0.05,]
+```
+
+Use Dunn's test for pairwise comparisons between groups with statistically significant differences
+Create box plots of groups annotated with statistically significant differences, labelled outliers and mean(red dot).
+Pretty plot groups without annotations and using color_scheme without annotations for figures.
+
+```{r,results="hide", message=FALSE, warning=FALSE}
+library(dunn.test)
+library(ggsignif)
+library(dplyr)
+## devtools::install_github("thomasp85/patchwork")
+library(patchwork)
+
+color_scheme_epitope_class <- c('#e03a3e','#0B9CD8','#963e67','#F58220','#61bb46','#6D6E71','#fdb724','#2e3192','#000000')
+names(color_scheme_epitope_class) <- c('Base','Cap','Fusion','GP1/Core','GP1/Head','GP1/2','HR2','Mucin','Unknown')
+
+generate_annotations <- function(t, ymax, diff){
+    start = c()
+    end = c()
+    y = c()
+    label=c()
+    for(i in rownames(t)){
+        if(t[i ,"P.adjusted"] <= 0.05){
+            ymax = ymax + (diff/length(names(t)))
+            v <- unlist(strsplit(as.character(t[i, "comparisons"]), " - "))
+            start <- c(start, v[1])
+            end <- c(end, v[2])
+            y <- c(y, ymax)
+            label <- c(label, signif(as.numeric(t[i, "P.adjusted"]), 3))
+        }
+    }
+    return(data.frame(start, end, y, label))
+}
+
+is_outlier <- function(x) {
+    return(x < quantile(x, 0.25) - 1.5 * IQR(x) | x > quantile(x, 0.75) + 1.5 * IQR(x))
+}
+
+fun_mean <- function(x){
+    return(data.frame(y=mean(x),label=signif(mean(x,na.rm=T), 2)))
+}
+
+t.f <- df
+
+cols <- epdiff[epdiff[,"corpval"]<0.05,"col"]
+plts <- list()
+
+orderEpitopeClass <- c("Unknown", "Mucin", "GP1/2", "GP1/Core", "Cap", "HR2","Fusion","Base","GP1/Head")
+
+## Dunn's test
+for(i in cols){
+    t.f[,"Epitope_Class"] <- factor(t.f$Epitope_Class, levels=orderEpitopeClass)
+    temp <- dunn.test(t.f[,i], t.f[,"Epitope_Class"], method="bh")
+    temp <- as.data.frame(temp)
+    temp <- temp[with(temp, order(comparisons)),]
+    anndf <- generate_annotations(temp, max(t.f[,i]), (range(t.f[,i])[2] - range(t.f[,i])[1]))
+    outliers <- t.f %>% group_by(Epitope_Class) %>% mutate(outlier = ifelse(is_outlier(eval(as.name(paste(i)))), id, ""))
+    t.f[,"outlier_label"] <- outliers[["outlier"]]
+    t.f[,paste("outlier_label", i, sep="_")] <- outliers[["outlier"]]
+    p <- ggplot(t.f, aes_string(x="Epitope_Class", y=`i`)) + geom_boxplot() + stat_summary(fun.y = mean, geom = "point", size = 1, color="red", fill="red", shape=23) + stat_summary(fun.data = fun_mean, geom="text", vjust=1.5, color="red") + geom_text(aes(label=outlier_label), hjust=-0.3)+theme(axis.text.x = element_text(angle = 90, hjust = 1)) + geom_signif(data=anndf, aes(xmin=start, xmax=end, annotations=label, y_position=y), textsize = 3, vjust = -0.2, manual=TRUE)
+    plts[[length(plts)+1]] <- p
+    medians <- aggregate(t.f[,i], by=list(t.f[,"Epitope_Class"]), FUN=median)
+    colnames(medians) <- c("Group", "x")
+    medians[,"Group"] <- factor(medians$Group,levels=orderEpitopeClass)
+    p <- ggplot(t.f, aes_string(x="Epitope_Class", y=`i`))+geom_jitter(aes(colour=Epitope_Class), stroke=0, position=position_jitter(width = 0.1, height=0), size=4, alpha=0.7)+scale_colour_manual(guide=FALSE,name = "Epitope Class",values = color_scheme_epitope_class) + stat_summary(fun.data="median_hilow", geom="linerange", size=0.2, colour="black")  + theme_bw()+ theme(panel.border = element_blank(), panel.grid.major.x = element_blank(), panel.grid.major.y = element_line( size=.3, color="#f5f5f5"), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), axis.text.x = element_text(angle = 45, hjust = 1)) +xlab("Epitope Class")+ geom_segment(aes(x=as.numeric(Group)-0.3, xend=as.numeric(Group)+0.3, y=x, yend=x), data=medians)+xlab("")+ylab(i)+ scale_y_continuous(labels = scales::percent)
+    plts[[length(plts)+1]] <- p
+}
+
+p <- plts[[1]]
+for(x in plts[-1]){
+    p <- p+ x
+}
+```
+
+```{r, fig.width = 14, fig.height=100}
+p + plot_layout(ncol = 2)
+
+```
+
+### Identify strong, partial and weak mAbs based on neutralization readouts
+
+We use k-means clustering of mABs using neutralization readouts - Neut_micro, Neut_VSV, Neut_dVP30 and unNeutFrac.
+To specify the number of clusters, 'k', we use the elbow method.
+
+```{r}
+df.neut <- df[,c("Neut_micro", "Neut_VSV", "Neut_dVP30", "unNeutFrac")]
+df.kmeans <- data.frame(clusters=c(1:10), wss=rep(c(0),times=10))
+for (i in 1:10){
+    set.seed(112358)
+    df.kmeans[i, "wss"] <- sum(kmeans(df.neut, centers=i)$withinss)
+}
+
+ggplot(data=df.kmeans, aes(x=clusters, y=wss, group=1)) +
+  geom_line()+
+  geom_point()
+```
+
+Let's select k = 5 based and use t-SNE to visualize the 5 clusters.
+
+```{r}
+set.seed(112358)
+df.kmeans <-  kmeans(df.neut, centers=5)
+df.nrneut <- df.neut
+
+library(Rtsne)
+library(RColorBrewer)
+set.seed(112358)
+df.tsne <- Rtsne(as.matrix(df.nrneut), check_duplicates = FALSE, max_iter = 5000, perplexity = 20)
+df.nrneut[,"x"] <- df.tsne$Y[,1]
+df.nrneut[,"y"] <- df.tsne$Y[,2]
+df.nrneut[,"cluster"] <- df.kmeans$cluster
+df.nrneut$cluster <- as.factor(df.nrneut[,"cluster"])
+ggplot(data=df.nrneut, aes(x= x, y = y, color=cluster)) + geom_point()+ scale_color_brewer("Cluster", palette="Dark2")
+```
+
+Let's now plot the four neutralization readouts grouped by clusters.
+
+```{r}
+library(reshape2)
+df.nrneut$id <- factor(df$id)
+df.nrneut$epclass <- df[,"Epitope_Class"]
+df.nrneut[,"Protection"] <- df[,"Protection"]
+df.nrneut$cluster <- factor(df.nrneut$cluster, levels=c(3,4,5,1,2))
+df.nrneut$id <- as.numeric(df.nrneut$id)
+df.nrneut <- df.nrneut[with(df.nrneut, order(cluster, -id)),]
+df.nrneut$id <- factor(df.nrneut$id, levels=df.nrneut$id)
+df.neut <- melt(subset(df.nrneut, select=-c(x,y)))
+## df.neut$id <- factor(df.neut$id, levels=df.neut$id)
+## df.neut$xlabel <- paste(df.neut, df.neut$id)
+p_neut <- ggplot() +geom_point(data=df.neut, size=3, aes(x=id, y=variable)) + geom_point(data=df.neut, size=2.5, aes(colour=value, x=id, y=variable)) +scale_colour_gradientn(colors=brewer.pal(9,"YlOrRd")) + theme(panel.background = element_rect(fill = '#FFFFFF', colour = '#FFFFFF'), axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5, size=8), axis.text.y = element_text(size=14), text=element_text(size=12))+ xlab("Antibody") + ylab("")
+y1 <- c()
+y2 <- c()
+x1 <- c()
+x2 <- c()
+ep <- c()
+for(i in levels(df.neut[,"cluster"])){
+    u <- unique(df.neut[,"id"][df.neut["cluster"]==i])
+    x1 <- c(x1, as.numeric(u[1])-0.45)
+    x2 <- c(x2, as.numeric(tail(u,n = 1))+0.45)
+    y1 <- c(y1, min(as.numeric(df.neut$variable))-0.5)
+    y2 <- c(y2, max(as.numeric(df.neut$variable))+0.5)
+    ep <- c(ep, i)
+}
+
+shade <- data.frame(x1, x2, y1, y2, ep)
+p_neut <- p_neut+geom_rect(data=shade,mapping = aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color=brewer.pal(length(shade[,"ep"]), "Set1"), alpha=0, fill="transparent", size=0.5)
+
+## Add Annotations
+for(i in rownames(shade)){
+    p_neut <- p_neut + annotate("text",x=shade[i, "x1"],y=shade[i, "y2"], angle=0,hjust=-0.5,vjust=1.2,label=shade[i, "ep"],size=4)
+}
+
+```
+```{r, fig.width = 5, fig.height=22, fig.align="center"}
+p_neut + coord_flip()
+```
+
+Based on the plot above, let's classify the clusters as following,
+
+* 2 -> "Weak"
+* 1,4,5 -> "Partial"
+* 3 -> "Strong"
+
+```{r}
+df[,"cluster"] <- df.nrneut$cluster
+df[df[,"cluster"]=="2","groups"] <- "weak"
+df[df[,"cluster"]=="1","groups"] <- "partial"
+df[df[,"cluster"]=="4","groups"] <- "partial"
+df[df[,"cluster"]=="5","groups"] <- "partial"
+df[df[,"cluster"]=="3","groups"] <- "strong"
+```
+
+Let's now use Dunn's test to check if the difference in means of the neutralization readouts between all three groups is statistically significant, thus validating our previous step.
+
+```{r,results="hide", message=FALSE, warning=FALSE}
+t.f <- df
+plts <- list()
+
+groups_color_scheme <- c("#D75466", "#ffc107", "#17a2b8")
+cols <- c("Neut_micro", "unNeutFrac", "Neut_dVP30", "Neut_VSV", "Protection")
+orderGroups <- c("weak", "partial", "strong")
+for(i in cols){
+    t.f[,"groups"] <- factor(t.f[,"groups"], levels = orderGroups)
+    temp <- dunn.test(t.f[,i], t.f[,"groups"], method="bh")
+    temp <- as.data.frame(temp)
+    temp <- temp[with(temp, order(comparisons)),]
+    anndf <- generate_annotations(temp, max(t.f[,i]), (range(t.f[,i])[2] - range(t.f[,i])[1]))
+    ## Boxplot
+    outliers <- t.f %>% group_by(groups) %>% mutate(outlier = ifelse(is_outlier(eval(as.name(paste(i)))), id, ""))
+    t.f[,"outlier_label"] <- outliers[["outlier"]]
+    t.f[,paste("outlier_label", i, sep="_")] <- outliers[["outlier"]]
+    p <- ggplot(t.f, aes_string(x="groups", y=`i`)) + geom_boxplot() + stat_summary(fun.y = mean, geom = "point", size = 1, color="red", fill="red", shape=23) + stat_summary(fun.data = fun_mean, geom="text", vjust=1.5, color="red") + geom_text(aes(label=outlier_label), hjust=-0.3)+theme(axis.text.x = element_text(angle = 90, hjust = 1)) + geom_signif(data=anndf, aes(xmin=start, xmax=end, annotations=label, y_position=y), textsize = 3, vjust = -0.2, manual=TRUE)
+    plts[[length(plts)+1]] <- p
+    medians <- aggregate(t.f[,i], by=list(t.f[,"groups"]), FUN=median)
+    colnames(medians) <- c("Group", "x")
+    medians[,"Group"] <- factor(medians$Group,levels=orderGroups)
+    p <- ggplot(t.f, aes_string(x="groups", y=`i`))+geom_jitter(aes(colour=groups), stroke=0, position=position_jitter(width = 0.1, height=0), size=4, alpha=0.7)+scale_colour_manual(guide=FALSE,name = "Groups",values = groups_color_scheme) + stat_summary(fun.data="median_hilow", geom="linerange", size=0.2, colour="black")  + theme_bw()+ theme(text = element_text(size=14), axis.text = element_text(size=14), panel.border = element_blank(), panel.grid.major.x = element_blank(), panel.grid.major.y = element_line( size=.3, color="#f5f5f5"), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), axis.text.x = element_text(angle = 45, hjust = 1)) +xlab("Groups")+ geom_segment(aes(x=as.numeric(Group)-0.3, xend=as.numeric(Group)+0.3, y=x, yend=x), data=medians)+xlab("Groups")+ylab(i)
+    plts[[length(plts)+1]] <- p
+}
+p <- plts[[1]]
+for(x in plts[-1]){
+    p <- p+ x
+}
+```
+
+```{r, fig.width = 14, fig.height=30}
+p + plot_layout(ncol = 2)
+```
+
+We see that at a significance level of 0.05, the difference in the means of four neutralization readouts across the three groups is statistically significant thus validating out previous step of classifying the clusters int ostrong, weak and partial neutralizers.

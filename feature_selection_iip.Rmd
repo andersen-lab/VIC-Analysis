@@ -1,0 +1,399 @@
+# Feature Selection and mAb Classification
+
+### Read dataset and preprocess.
+
+Remove mAb 135 because it is missing Neut_micro.
+
+```{r}
+df <- read.csv("./data/master_log.csv", na.strings=c("?", "nd"), strip.white=TRUE, row.names=c("Ab"))
+df <- df[!rownames(df) %in% c("135"),]
+```
+
+Convert Epitope Class to a factor.
+
+```{r}
+df$Epitope_Class <- factor(df$Epitope_Class)
+```
+
+Drop columns with missing values.
+
+```{r}
+df <- subset(df, select=-c(Protect_binary, Epitope_Class_ELISA, Endotoxin, Endotoxin.1, mW_Loss, aTTD, Epitope.Class..assigning.method.)) #Remove columns with empty values.
+df[,"Escape..code"] <- as.factor(df[,"Escape..code"])
+df[,"Makona.binding"] <- as.factor(df[,"Makona.binding"])
+```
+
+Transform into IIP.
+
+```{r}
+df[,"unNeutFrac"] <- -log10(1/df[,"unNeutFrac"])
+df[,"Neut_dVP30"] <- 1- df[,"Neut_dVP30"]
+df[,"Neut_VSV"] <- log10(100/df[,"Neut_VSV"])
+```
+
+Let's examine the correlations between the different neutralization readouts.
+
+```{r}
+library(ggplot2)
+theme_set(theme_bw(base_size = 14))
+library(reshape2)
+c <- cor(df[,c("Protection", "Neut_micro", "Neut_dVP30", "Neut_VSV", "unNeutFrac")])
+c
+c <- melt(c)
+ggplot(c, aes(x=Var1, y=Var2)) + geom_tile(aes(fill=value)) + scale_fill_gradient(low="white", high="steelblue")
+```
+
+Let's look at the distribution of the four neutrlization readouts vs Protection.
+
+```{r}
+library(patchwork)
+
+plts <- list()
+for(i in c("Neut_micro", "Neut_dVP30", "Neut_VSV", "unNeutFrac")){
+    p <- ggplot(df, aes_string(x=i,y="Protection")) + geom_point() + geom_smooth(method='lm') + theme_bw()
+    plts[[length(plts)+1]] <- p
+}
+
+p <- plts[[1]]
+for(x in plts[-1]){
+    p <- p+ x
+}
+
+p + plot_layout(ncol = 2)
+```
+
+Separate Human IgG1 and Mouse IgG1
+
+```{r}
+levels(df[,"Isotype"]) <- c(levels(df[,"Isotype"]), "HumanIgG1")
+df[df[,"Isotype"]=="IgG1" & df[,"Species"]=="human", "Isotype"] <- "HumanIgG1"
+levels(df[,"Isotype"]) <- c(levels(df[,"Isotype"]), "MouseIgG1")
+df[df[,"Isotype"]=="IgG1" & df[,"Species"]=="mouse", "Isotype"] <- "MouseIgG1"
+df[,"Isotype"] <- droplevels(df[,"Isotype"])
+```
+
+Convert polyfunctionality to numeric type.
+```{r}
+df[,"Polyfunctionality"] <- as.numeric(df[,"Polyfunctionality"])
+```
+
+Add Epitope Tier columns
+```{r}
+df[df$Epitope_Class %in% c("Cap", "GP1/Head", "Mucin"), "Epitope_Tier"] <- "Tier1"
+df[df$Epitope_Class %in% c("Base", "GP1/Core", "Fusion"), "Epitope_Tier"] <- "Tier2"
+df[df$Epitope_Class %in% c("GP1/2", "HR2"), "Epitope_Tier"] <- "Tier3"
+df[df$Epitope_Class %in% c("Unknown"), "Epitope_Tier"] <- "TierUnknown"
+```
+
+Dropidentical features and features with missing experimental data.
+```{r}
+t <- subset(df, select=-c(Round, Makona.binding, Escape..code, Epitope_Tier, Total_SA,Cross.reactivity))
+```
+
+Remove features with near zero variance.
+Features are centered and scaled.
+
+```{r message=FALSE, warning=FALSE}
+library(caret)
+s <- dummyVars(~., data <- t, levelsOnly=TRUE)
+q <- predict(s, t)
+h <- nearZeroVar(q, saveMetrics=TRUE)
+q <- q[,(colnames(q) %in% rownames(h[h[,"nzv"]==FALSE | h[,"zeroVar"]==TRUE,]))]
+q <- subset(q, select =-c(Unknown, sGP.binderFALSE))
+
+norm <- preProcess(q, method=c("center", "scale"))
+q <- predict(norm, q)
+q <- as.data.frame(q)
+head(q)
+```
+
+Let's build a classifier to classify mAbs into "high" and "low" protection. We set the threshold between "high" and "low" as 0.6.
+
+```{r}
+threshold <- 0.6
+t[t[,"Protection"]<threshold,"label"] <- "Low"
+t[(t[,"Protection"]>=threshold),"label"] <- "High"
+q[,"label"] <- t[,"label"]
+
+t <- q
+```
+
+Before we start training our models. Let's enable R to use multiple cores.
+
+```{r}
+library(doMC)
+registerDoMC(cores = 16)
+```
+
+Let's first train a Random Forest Model and get the predictions.
+
+```{r}
+repeats <- 1000
+set.seed(112358)
+rfControl <- trainControl(
+  method = "repeatedcv",
+  number = 10,
+  repeats= repeats,
+  verboseIter = FALSE,
+  returnData = FALSE,
+  allowParallel = TRUE,
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE,
+  savePredictions = T,
+  search="grid"
+)
+
+rfTrain <- train(
+  x = as.matrix(subset(t, select=-c(label, Protection))),
+  y = as.character(t[,"label"]),
+  trControl = rfControl,
+  method = "rf",
+  ntree = 1000,
+  tuneLength = 10
+)
+
+rfTrain
+rfTrain$finalModel
+
+predRf <- rfTrain$pred
+predRf <- predRf[predRf[,"mtry"]==rfTrain$bestTune$mtry,]
+```
+
+Let's plot feature importance for the Random Forest model.
+
+```{r}
+impRf <- varImp(rfTrain$finalModel, scaled=FALSE)
+impRf[,"Variable"] <- rownames(impRf)
+impRf <- impRf[with(impRf, order(-Overall)),]
+impRf[,"Variable"] <- factor(impRf[,"Variable"], levels = impRf[,"Variable"])
+pp <- ggplot(impRf, aes(Variable, Overall)) + geom_bar(stat="identity", fill="#000000")
+pp + theme_bw()+ theme(text = element_text(size=14), axis.text = element_text(size=14), panel.border = element_blank(), panel.grid.major.x = element_blank(), panel.grid.major.y = element_line( size=.3, color="#f5f5f5"), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), axis.text.x = element_text(angle = 90, hjust = 1)) + xlab("Feature") + ylab("Mean Decrease in Gini Index")
+```
+
+Let's now train a logistic regression model with elastic net regularization.
+
+```{r}
+require(methods)
+lrControl <- trainControl(
+  method = "repeatedcv",
+  number = 10,
+  repeats= repeats,
+  verboseIter = FALSE,
+  returnData = FALSE,
+  allowParallel = TRUE,
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE,
+  savePredictions = T
+)
+
+set.seed(112358)
+lrTrain <- train(
+  x = as.matrix(subset(t, select=-c(label, Protection))),
+  y = as.character(t[,"label"]),
+  trControl = lrControl,
+  method = "glmnet",
+  tuneLength = 10
+)
+
+lrTrain
+
+predlr <- lrTrain$pred
+predlr <- predlr[predlr[,"alpha"]==lrTrain$bestTune$alpha & predlr[,"lambda"]==lrTrain$bestTune$lambda, ]
+
+```
+In logistic regression notice how alpha = 1(lasso) performs best based on ROC.
+Let's now train a support vector machine.
+
+```{r}
+set.seed(112358)
+svmControl <- trainControl(
+  method = "repeatedcv",
+  number = 10,
+  repeats= repeats,
+  classProbs = T,
+  savePredictions = T
+)
+
+svmTrainLinear <- train(label~., data = subset(t, select=-c(Protection)),trControl = svmControl,method = "svmLinear", tuneLength = 10)
+svmTrainRadial <- train(label~., data = subset(t, select=-c(Protection)),trControl = svmControl,method = "svmRadial", tuneLength = 10)
+
+svmTrainLinear
+svmTrainRadial
+
+predSVMLinear <- svmTrainLinear$pred
+predSVMRadial <- svmTrainRadial$pred
+
+
+```
+
+We see that a linear function does better than the radial basis function.
+
+```{r}
+predSVM <- predSVMLinear
+```
+
+Let's now train a K nearest neighbour model
+
+```{r}
+## KNN
+set.seed(112358)
+knnControl <- trainControl(
+  method = "repeatedcv",
+  number = 10,
+  repeats= repeats,
+  savePredictions = T,
+  classProbs= T
+)
+knnTrain <- train(label~., data = subset(t, select=-c(Protection)),trControl = knnControl,method = "knn", tuneLength = 10)
+predKnn <- knnTrain$pred
+predKnn <- predKnn[predKnn[,"k"]==knnTrain$bestTune$k,]
+
+knnTrain
+```
+Let's now compute the ROC curves for all four classifiers. 
+The function getRocCV computes the ROC curves for each iteration(We used a 1000 iterations for each classifier).
+getAvgRoc plots the average of all 1000 ROC curves.
+
+```{r}
+
+library(ROCR)
+
+getRocCV <- function(pred){
+    temp.obs <- c()
+    temp.pred <- c()
+    for(i in seq(1, repeats)){
+        temp <- paste("Rep", sprintf("%04d",i), sep="")
+        temp.p <- pred[grepl(temp, pred[,"Resample"]), "Low"]
+        temp.o <- pred[grepl(temp, pred[,"Resample"]), "obs"]
+        temp.pred[[length(temp.pred)+1]] <- temp.p
+        temp.obs[[length(temp.obs)+1]] <- temp.o
+    }
+    return(list(temp.pred, temp.obs));
+}
+
+getAvgRoc <- function(roc){
+    m <- max(sapply(roc@x.values, length))
+    resx <- sapply(roc@x.values, function(x){
+        x <- c(x, rep(NA, m-length(x)));
+    });
+    resy <- sapply(roc@y.values, function(x){
+        x <- c(x, rep(NA, m-length(x)));
+    });
+    roc.df <- data.frame(rowMeans(as.data.frame(resx), na.rm=T), rowMeans(as.data.frame(resy), na.rm=T))
+    colnames(roc.df) <- c("meanx", "meany")
+    return(roc.df)
+}
+
+predRf <- getRocCV(predRf)
+p <- prediction(predRf[1][[1]], predRf[2][[1]])
+rocRf <- performance(p, "tpr", "fpr")
+rocRf.avg <- getAvgRoc(rocRf)
+
+predlr <- getRocCV(predlr)
+p <- prediction(predlr[1][[1]], predlr[2][[1]])
+roclr <- performance(p, "tpr", "fpr")
+roclr.avg <- getAvgRoc(roclr)
+
+predSVM <- getRocCV(predSVM)
+p <- prediction(predSVM[1][[1]], predSVM[2][[1]])
+rocSvm <- performance(p, "tpr", "fpr")
+rocSvm.avg <- getAvgRoc(rocSvm)
+
+predKnn <- getRocCV(predKnn)
+p <- prediction(predKnn[1][[1]], predKnn[2][[1]])
+rocKnn <- performance(p, "tpr", "fpr")
+rocKnn.avg <- getAvgRoc(rocKnn)
+```
+
+Let's compute the average accuracy and AUC across all 1000 iterations for each classifier and plot the ROC curves.
+
+```{r}
+
+l <- c("Random Forest", "Logistic Regression", "SVM", "KNN")
+## Get AUC
+r <- list(predRf, predlr, predSVM, predKnn)
+auc <- c()
+acc <- c()
+for(i in seq(1, length(r))){
+    p <- prediction(r[i][[1]][[1]], r[i][[1]][[2]])
+    a <- performance(p, "auc")
+    a <- mean(unlist(a@y.values))
+    auc <- c(auc,a)
+    a <- performance(p, "acc")
+    a <- mean(unlist(a@y.values))
+    acc <- c(acc,a)
+}
+
+acc
+auc
+
+r <- list(rocRf, roclr, rocSvm, rocKnn)
+r.avg <- list(rocRf.avg, roclr.avg, rocSvm.avg, rocKnn.avg)
+rocdf <- as.data.frame(matrix(ncol = 4, nrow = 0))
+rocdf.avg <- as.data.frame(matrix(ncol = 3, nrow = 0))
+for(i in seq(1, length(r))){
+    r.t <- r[i]
+    for(j in seq(1, repeats)){
+        temp <- data.frame(r.t[[1]]@x.values[[j]], r.t[[1]]@y.values[[j]], rep(l[i], length(r.t[[1]]@y.values[[j]])), rep(paste(l[i], j, sep="."), length(r.t[[1]]@y.values[[j]])))
+        colnames(temp) <- c("x", "y", "classifier", "rep")
+        rocdf <- rbind(rocdf, temp)
+    }
+    r.t <- r.avg[[i]]
+    temp <- data.frame(r.t$meanx, r.t$meany, rep(paste(l[i], "Average", sep=" "), length(r.t$meanx)))
+    colnames(temp) <- c("meanx", "meany", "classifieravg")
+    rocdf.avg <- rbind(rocdf.avg, temp)
+}
+colnames(rocdf) <- c("x", "y", "classifier", "rep")
+
+library(RColorBrewer)
+
+classifierColor <- brewer.pal(9,"Dark2")
+cc <- c()
+ll <- c()
+for(i in seq(1, length(l))){
+    cc <- c(cc, rep(classifierColor[i], 2))
+    ll <- c(ll, l[i], paste(l[i], "Average", sep=" "))
+}
+names(cc) <- ll
+
+pp <- ggplot(rocdf[rocdf[,"classifier"]=="Random Forest",]) + geom_line(aes(x = meanx, y = meany), data=rocdf.avg[rocdf.avg[,"classifieravg"]=="Random Forest Average",], alpha=1, size=0.5) + geom_abline(color="#707070") + geom_boxplot(alpha=0.05, aes(x=x, y=y,group = cut_width(x, 0.02))) + scale_color_manual(values=cc) +xlab("FPR") +ylab("TPR") + ggtitle(paste("ROC Curves for Random Forest model with 10-fold CV repeated", repeats, "times"))
+pp
+
+pp <- ggplot(rocdf[rocdf[,"classifier"]=="Logistic Regression",]) + geom_line(aes(x = meanx, y = meany), data=rocdf.avg[rocdf.avg[,"classifieravg"]=="Logistic Regression Average",], alpha=1, size=0.5) + geom_abline(color="#707070") + geom_boxplot(alpha=0.05, aes(x=x, y=y,group = cut_width(x, 0.02))) + scale_color_manual(values=cc) +xlab("FPR") +ylab("TPR") + ggtitle(paste("ROC Curves for Logistic Regression model with 10-fold CV repeated", repeats, "times"))
+pp
+
+pp <- ggplot(rocdf[rocdf[,"classifier"]=="SVM",]) + geom_line(aes(x = meanx, y = meany), data=rocdf.avg[rocdf.avg[,"classifieravg"]=="SVM Average",], alpha=1, size=0.5) + geom_abline(color="#707070") + geom_boxplot(alpha=0.05, aes(x=x, y=y,group = cut_width(x, 0.02))) + scale_color_manual(values=cc) +xlab("FPR") +ylab("TPR") + ggtitle(paste("ROC Curves for SVM with 10-fold CV repeated", repeats, "times"))
+pp
+
+pp <- ggplot(rocdf[rocdf[,"classifier"]=="KNN",]) + geom_line(aes(x = meanx, y = meany), data=rocdf.avg[rocdf.avg[,"classifieravg"]=="KNN Average",], alpha=1, size=0.5) + geom_abline(color="#707070") + geom_boxplot(alpha=0.05, aes(x=x, y=y,group = cut_width(x, 0.02))) + scale_color_manual(values=cc) +xlab("FPR") +ylab("TPR") + ggtitle(paste("ROC Curves for KNN model with 10-fold CV repeated", repeats, "times"))
+pp
+
+pp <- ggplot() + geom_line(aes(meanx, meany, color=classifieravg), data=rocdf.avg, alpha=1, size=0.5) + geom_abline(color="#707070") + scale_color_manual(values=cc) +xlab("FPR") +ylab("TPR") + ggtitle(paste("Average ROC Curves for 10-fold CV repeated", repeats, "times"))
+for(i in seq(1, length(auc))){
+    pp <- pp + annotate("text", label = paste("AUC:", round(auc[i], 3), "ACC:", round(acc[i], 3), sep=" "), x = 1, y = 0.25-(i*0.05), size = 4, colour = cc[l[i]][[1]], hjust=1)
+}
+pp <- pp + theme_bw()+ theme(text = element_text(size=14), axis.text = element_text(size=14), panel.border = element_blank(), panel.grid.major.x = element_blank(), panel.grid.major.y = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + ggtitle("ROC curves across 1000 iterations")
+pp
+
+pp <- ggplot() + geom_line(aes(meanx, meany, color=classifieravg), data=rocdf.avg, alpha=1, size=0.5) + geom_abline(color="#707070") + scale_color_manual(values=cc) +xlab("FPR") +ylab("TPR") + ggtitle(paste("Average ROC Curves for 10-fold CV repeated", repeats, "times"))
+## for(i in seq(1, length(auc))){
+##     print(i)
+##     pp <- pp + annotate("text", label = paste(l[i], "AUC:", round(auc[i], 3), "ACC:", round(acc[i], 3), sep=" "), x = 1, y = 0.25-(i*0.05), size = 4, colour = cc[l[i]][[1]], hjust=1)
+## }
+pp <- pp + theme_bw()+ theme(text = element_text(size=14), axis.text = element_text(size=14), panel.border = element_blank(), panel.grid.major.x = element_blank(), panel.grid.major.y = element_line( size=.3, color="#f5f5f5"), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + ggtitle("ROC curves across 1000 iterations")
+```
+
+Let's take a look at the features selected by the logistic regression
+
+```{r}
+bestcoef <- coef(lrTrain$finalModel, s = lrTrain$bestTune$lambda)
+bestcoef <- as.data.frame(as.matrix(bestcoef))
+temp <- bestcoef[bestcoef[,"1"]!=0 & rownames(bestcoef)!="(Intercept)",]
+temp.name <- rownames(bestcoef)[bestcoef[,"1"]!=0 & rownames(bestcoef)!="(Intercept)"]
+temp <- as.data.frame(temp)
+colnames(temp) <- c("val")
+temp$name <- temp.name
+temp[,"val"] <- temp["val"]*-1
+col <- as.vector(unlist(lapply(temp[,"val"], function(x){if(x>0) "Positive" else "Negative"})))
+ggplot(temp, aes(y=val, x=reorder(name, abs(val)))) + geom_bar(stat="identity", aes(fill=col)) + coord_flip()+xlab("Feature") +ylab("Coeffecient") + scale_fill_manual(guide=FALSE, values=c("Red", "Blue")) + theme(panel.background = element_rect(fill = '#FFFFFF', colour = '#000000'), panel.grid.major.x = element_blank(), panel.grid.major.y = element_blank(), panel.grid.minor = element_blank())
+```
