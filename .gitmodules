@@ -1,0 +1,6 @@
+[submodule "data-explorer"]
+	path = data-explorer
+	url = https://github.com/gkarthik/VIC-Data-Explorer.git
+[submodule "corr-network"]
+	path = corr-network
+	url = https://github.com/gkarthik/VIC-corr-network.git
