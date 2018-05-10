@@ -98,7 +98,14 @@ library(caret)
 s <- dummyVars(~., data <- t, levelsOnly=TRUE)
 q <- predict(s, t)
 h <- nearZeroVar(q, saveMetrics=TRUE)
-q <- q[,(colnames(q) %in% rownames(h[h[,"nzv"]==FALSE | h[,"zeroVar"]==TRUE,]))]
+
+t.var <- apply(q, 2, var)
+t.var <- as.data.frame(t.var)
+t.var[,"Var"] <- rownames(t.var)
+t.var[,"nzv"] <- h$nzv
+ggplot(t.var, aes(x=reorder(Var, t.var), y=t.var)) + geom_bar(stat="identity", aes(fill=nzv)) + scale_y_continuous(trans='log10') + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + scale_fill_manual(values = c("steelblue", "indianred"),name= "Near Zero Variance") + ggtitle("Features with near zero variance that will be removed.") +xlab("Feature") + ylab("log10(Variance)")
+
+q <- q[,(colnames(q) %in% rownames(h[h[,"nzv"]==FALSE ,]))]
 q <- subset(q, select =-c(Unknown, sGP.binderFALSE))
 
 norm <- preProcess(q, method=c("center", "scale"))
