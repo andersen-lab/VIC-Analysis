@@ -10,6 +10,6 @@ There are two submodules data-exporer and corr-network in this repository hostin
 Links to the R markdown notebooks rendered as html pages are shown below.
 
 * For the univariate analysis and clustering please see this R markdown file - [Analysis](https://andersen-lab.github.io/VIC-Analysis/analysis[exported].html)
+* For the feature selection analysis without IIP transform(no change in performance) that selects for fewer features, please see - [Feature Selection](https://andersen-lab.github.io/VIC-Analysis/feature_selection[exported].html)
 * For the feature selection analysis using the IIP transform on Neut_VSV and unNeutFrac(as in paper), please see - [Feature Selection with IIP transformation](https://andersen-lab.github.io/VIC-Analysis/feature_selection_iip[exported].html)
-* For the feature selection analysis without IIP transform(no change in performance) that selects for fewer features, please see - [Feature Selection with IIP transformation](https://andersen-lab.github.io/VIC-Analysis/feature_selection[exported].html)
 
