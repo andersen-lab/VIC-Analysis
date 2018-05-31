@@ -88,6 +88,7 @@ df[df$Epitope_Class %in% c("Unknown"), "Epitope_Tier"] <- "TierUnknown"
 Dropidentical features and features with missing experimental data.
 ```{r}
 t <- subset(df, select=-c(Round, Makona.binding, Escape..code, Epitope_Tier, Total_SA,Cross.reactivity))
+t <- subset(t, select=-c(Isotype))
 ```
 
 Remove features with near zero variance.
@@ -199,6 +200,7 @@ lrTrain <- train(
   y = as.character(t[,"label"]),
   trControl = lrControl,
   method = "glmnet",
+  family="binomial",
   tuneLength = 10
 )
 
@@ -403,4 +405,16 @@ temp$name <- temp.name
 temp[,"val"] <- temp["val"]*-1
 col <- as.vector(unlist(lapply(temp[,"val"], function(x){if(x>0) "Positive" else "Negative"})))
 ggplot(temp, aes(y=val, x=reorder(name, abs(val)))) + geom_bar(stat="identity", aes(fill=col)) + coord_flip()+xlab("Feature") +ylab("Coeffecient") + scale_fill_manual(guide=FALSE, values=c("Red", "Blue")) + theme(panel.background = element_rect(fill = '#FFFFFF', colour = '#000000'), panel.grid.major.x = element_blank(), panel.grid.major.y = element_blank(), panel.grid.minor = element_blank())
+```
+
+Let's now take a look at the antibodies for which the LR model failed. Let's plot true protection vs the probability with which the LR model decided to classify as High. We shall also annotate the false positives(bottom right corner) and false negatives(top left) with ids.
+
+```{r}
+lrProb <- predict(lrTrain, q, type="prob")
+lrProb[,"predicted"] <- predict(lrTrain, q)
+lrProb[,"truth"] <- q[,"label"]
+lrProb[,"Protection"] <- df[,"Protection"]
+lrProb[,"id"] <- rownames(df)
+lrProb[lrProb$predicted==lrProb$truth,"id"] <- ""
+ggplot(lrProb, aes(x=High, y=Protection, color=predicted, shape=truth, group=interaction(predicted, truth))) + geom_point(size = 6) + xlab("Predicted Probability of High Protection") + ylab("True Protection") + geom_hline(yintercept=0.6, linetype="dashed", alpha=0.6) + geom_vline(xintercept=0.5, linetype="dashed", alpha=0.6) + geom_text(aes(label=id), color="black", alpha=1, nudge_y = 0.05)
 ```
