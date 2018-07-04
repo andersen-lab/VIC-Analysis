@@ -26,7 +26,6 @@ df[,"Makona.binding"] <- as.factor(df[,"Makona.binding"])
 Make unNeutFrac, Neut_dVP30 and Neut_VSV correlate positively with Protection.
 
 ```{r}
-df[,"unNeutFrac"] <- 1- df[,"unNeutFrac"]
 df[,"Neut_dVP30"] <- 1- df[,"Neut_dVP30"]
 df[,"Neut_VSV"] <- (100 - df[,"Neut_VSV"])/100
 ```
@@ -69,16 +68,24 @@ Plot only statistically significant correlations(significance value = 0.05).
 library(ggplot2)
 
 ## Correlation Strength
-co <- sapply(colnames(df), function(x){
+co.pvalue <- sapply(colnames(df), function(x){
     if(is.numeric(df[,x])){
         t <- cor.test(df[,"Protection"], df[,x], method="spearman", exact=FALSE)
-        if(t$p.value <= 0.05){
-            t$estimate
-        }
+        t$p.value
     }
 })
-co <- as.data.frame(unlist(co))
-colnames(co) <- c("corr")
+co.estimate <- sapply(colnames(df), function(x){
+    if(is.numeric(df[,x])){
+        t <- cor.test(df[,"Protection"], df[,x], method="spearman", exact=FALSE)
+        as.numeric(t$estimate)
+    }
+})
+
+co <- data.frame(unlist(co.pvalue), unlist(co.estimate))
+colnames(co) <- c("pval", "corr")
+co$pval <- p.adjust(co$pval, method="BH")
+co <- co[co$pval <= 0.05,]
+
 rownames(co) <- sapply(rownames(co), function(x){
     gsub(".rho", "", x)
 })
