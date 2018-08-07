@@ -26,6 +26,7 @@ df[,"Makona.binding"] <- as.factor(df[,"Makona.binding"])
 Make unNeutFrac, Neut_dVP30 and Neut_VSV correlate positively with Protection.
 
 ```{r}
+df[,"unNeutFrac"] <- 1 - df[,"unNeutFrac"]
 df[,"Neut_dVP30"] <- 1- df[,"Neut_dVP30"]
 df[,"Neut_VSV"] <- (100 - df[,"Neut_VSV"])/100
 ```
@@ -265,12 +266,12 @@ df.nrneut$id <- factor(df$id)
 df.nrneut$epclass <- df[,"Epitope_Class"]
 df.nrneut[,"Protection"] <- df[,"Protection"]
 df.nrneut$cluster <- factor(df.nrneut$cluster, levels=c(3,4,5,1,2))
-df.nrneut$id <- as.numeric(df.nrneut$id)
+## df.nrneut$id <- as.numeric(df.nrneut$id)
 df.nrneut <- df.nrneut[with(df.nrneut, order(cluster, -id)),]
 df.nrneut$id <- factor(df.nrneut$id, levels=df.nrneut$id)
 df.neut <- melt(subset(df.nrneut, select=-c(x,y)))
-## df.neut$id <- factor(df.neut$id, levels=df.neut$id)
-## df.neut$xlabel <- paste(df.neut, df.neut$id)
+df.neut$id <- factor(df.neut$id, levels=df.neut$id)
+df.neut$xlabel <- paste(df.neut, df.neut$id)
 p_neut <- ggplot() +geom_point(data=df.neut, size=3, aes(x=id, y=variable)) + geom_point(data=df.neut, size=2.5, aes(colour=value, x=id, y=variable)) +scale_colour_gradientn(colors=brewer.pal(9,"YlOrRd")) + theme(panel.background = element_rect(fill = '#FFFFFF', colour = '#FFFFFF'), axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5, size=8), axis.text.y = element_text(size=14), text=element_text(size=12))+ xlab("Antibody") + ylab("")
 y1 <- c()
 y2 <- c()
